@@ -1210,24 +1210,17 @@ def topout_vs(header_write, atoms_write, bonds_write, angles_write, dihedrals_wr
                 for vs, cb in virtual_sites.items():
                     if str(vs+1) in bond_line[:2]:
                         # memorizing atom bonded with VS = vs_bond
-                        if str(vs+1) == bond_line[0] : vs_bond = bond_line[1] 
-                        if str(vs+1) == bond_line[1] : vs_bond = bond_line[0]
+                        bonded_to_vs = bond_line[1] if str(vs+1) == bond_line[0] else bond_line[0]
 
                         #memorize VS bond count
                         if str(vs+1) not in bond_with_vs:
                             bond_with_vs[str(vs+1)]=[]
-                        if vs_bond not in bond_with_vs.values():
-                            bond_with_vs[str(vs+1)].append(vs_bond) #beads bounded to VS
+                        if bonded_to_vs not in bond_with_vs[str(vs+1)]: #.values():
+                            bond_with_vs[str(vs+1)].append(bonded_to_vs) #beads bounded to VS
 
                         #Check if bond between bead B and VS is the only bond connecting B to the rest of the molecule: if yes, don't remove it
-                        nb_occ=0
-                        if str(vs+1) == bond_line[0]:
-                            for i in bonds_list:
-                                if bond_line[1] in i: nb_occ+=1
-                        else:
-                            for i in bonds_list:
-                                if bond_line[0] in i: nb_occ+=1
-                        if line in modified_lines_bonds and nb_occ>1: modified_lines_bonds.remove(line)
+                        if line in modified_lines_bonds and len(bond_with_vs[str(vs+1)])>1: # nb_occ>1: 
+                            modified_lines_bonds.remove(line)
     modified_bonds_write = "\n".join(modified_lines_bonds)
 
     #Angles: delete lines describing interactions with VS 

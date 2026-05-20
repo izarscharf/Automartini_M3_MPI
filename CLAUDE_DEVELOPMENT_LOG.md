@@ -229,6 +229,14 @@ The headline numbers are in
 * **Keep the serial path as the default.** MPI overhead can dominate for
   small inputs; making the user opt in with `mpirun` keeps the default
   experience fast and predictable.
+* **Materialising combinatorial sequences is dangerous.** `np.array(list(combinations(N, k)))`
+  looks harmless for small molecules but is a time-bomb: C(28, 14) = 40 M rows
+  × 14 × 8 bytes = 4.5 GB per rank. The fix — a lazy `islice`-strided iterator
+  — keeps memory at O(1) regardless of molecule size at negligible CPU cost.
+* **Dead code in gather calls is expensive.** Two `comm.gather` calls were
+  shipping data that was immediately discarded. In a 153 M-trial run this would
+  have transferred gigabytes of useless data. Audit gather payloads before
+  assuming they're "small".
 
 ---
 
@@ -290,6 +298,26 @@ condensed paraphrase, not a verbatim transcript.
 > SDS topology; existing test suite unchanged.
 >
 > **User**: Update the README and other logs on the changes just made.
+>
+> **(Previous update.)**
+>
+> **User**: Runs DOC (desoxycholate, 28 heavy atoms) with `mpirun -n 4`. All
+> ranks are killed by the OS OOM killer (`SIGKILL`, exit code 137) almost
+> immediately. Investigation requested.
+>
+> **Claude Code**: The crash is OOM, not a code bug. Root cause: `find_bead_pos`
+> calls `np.array(list(itertools.combinations(28 atoms, k)))` inside the
+> `num_beads` loop — this materialises the full combinations array in RAM on
+> **every rank simultaneously**. At `k=10` that is 1 GB per rank (4.2 GB total);
+> at `k=11–14` it exceeds the 16 GB machine memory. Secondary finding: the
+> `list_combs` / `list_energies` accumulators and their two `comm.gather` calls
+> were dead code — computed and gathered but never read. Fix: replace the numpy
+> materialisation with `itertools.islice(combinations(...), rank, None, mpi_size)`
+> — a lazy generator that yields only each rank's strided share with O(1) live
+> memory. Remove the dead accumulators and their gather calls. Result: 4 ranks
+> hold ~90 MB each at full CPU utilisation instead of crashing at ~4+ GB.
+>
+> **User**: Update README and other fork descriptors to reflect the OOM fix.
 >
 > **(This update.)**
 

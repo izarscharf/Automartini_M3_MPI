@@ -27,15 +27,24 @@ Auto_MartiniM3
 > | `find_bead_pos` (caffeine, 14 heavy atoms)  | 3.06 s | **0.72 s** with 4 MPI ranks (4.2×) |
 > | ALOGPS HTTP batch (17 fragments)            | 5.7 s  | **2.7 s** with thread-pooled prefetch (2.1×) |
 >
-> **Bug fix — explicit-hydrogen molecules (e.g. deuterium-labelled lipids):** The
-> upstream `voronoi_atoms_new` / `voronoi_atoms_old` functions used local
-> heavy-atom indices (0..N-1) as dict keys but all downstream code expected
-> global RDKit atom indices. For normal molecules the two are identical; for
-> molecules with explicit H or `[2H]` atoms they diverge, causing either silent
-> wrong bead assignments or a hard `KeyError` crash. This fork fixes both
-> functions to return global-indexed partitioning and updates the one internal
-> caller (`all_atoms_in_beads_connected`) accordingly. Deuterated SDS now works
-> correctly in both serial and MPI modes.
+> **Bug fix 1 — explicit-hydrogen / deuterium molecules:** The upstream
+> `voronoi_atoms_new` / `voronoi_atoms_old` functions keyed `partitioning` on
+> local heavy-atom indices (0..N-1) while all downstream callers expected global
+> RDKit atom indices. For molecules with explicit `[2H]` labels this diverges,
+> causing a `KeyError` crash or silently wrong bead assignments. Both functions
+> now return global-indexed partitioning. Deuterated SDS runs correctly in both
+> serial and MPI modes.
+>
+> **Bug fix 2 — OOM kill on larger molecules (≥ 20 heavy atoms):**
+> `find_bead_pos` materialised the full `itertools.combinations` array with
+> `np.array(list(...))` **on every MPI rank simultaneously**. For a 28-atom
+> molecule this reaches 1–4.5 GB *per rank* before the OS OOM-killer fires
+> (`SIGKILL`). Additionally, intermediate `list_combs` / `list_energies`
+> accumulators were gathered across ranks but **never read** — dead code burning
+> both RAM and MPI bandwidth. Fix: replaced the materialisation with a lazy
+> `itertools.islice`-strided iterator (O(1) live memory per rank); removed the
+> dead accumulators and their `comm.gather` calls. With the fix, 4 ranks running
+> DOC (28 heavy atoms) hold ~90 MB each instead of crashing at ~4+ GB.
 >
 > Run the parallel pipeline with:
 > ```bash

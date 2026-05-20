@@ -163,7 +163,7 @@ the public ALOGPS service.
 | File | Change |
 |------|--------|
 | [auto_martiniM3/mpi_utils.py](auto_martiniM3/mpi_utils.py) | **New.** Thin wrapper exposing `get_mpi()`, `is_root()`, `bcast()`, `barrier()` with serial fallback. |
-| [auto_martiniM3/optimization.py](auto_martiniM3/optimization.py) | `find_bead_pos` is now MPI-aware: strided trial loop, per-rank locals, gather/bcast at each `num_beads` block. `voronoi_atoms_new` / `voronoi_atoms_old` fixed to return global-indexed `partitioning` (see §7). `all_atoms_in_beads_connected` updated accordingly. |
+| [auto_martiniM3/optimization.py](auto_martiniM3/optimization.py) | `find_bead_pos` is now MPI-aware: lazy islice-strided iterator (no numpy materialisation, see §8); per-rank locals; gather/bcast at each `num_beads` block; dead `list_combs`/`list_energies` removed. `voronoi_atoms_new` / `voronoi_atoms_old` fixed to return global-indexed `partitioning` (see §7). `all_atoms_in_beads_connected` updated accordingly. |
 | [auto_martiniM3/topology.py](auto_martiniM3/topology.py) | `smi2alogps` rewritten to use a memoised cache and a single-load `logP_smi.dat`; new `prefetch_alogps()` and HTTP helper `_alogps_http_request`; `print_atoms` does a one-shot prefetch pass. |
 | [auto_martiniM3/solver.py](auto_martiniM3/solver.py) | Stochastic embed/minimisation run only on rank 0 and the molecule broadcast; file writes and the converged-print gated on `is_root()`. |
 | [auto_martiniM3/\_\_main\_\_.py](auto_martiniM3/__main__.py) | `.gro` writes gated on `is_root()`. |
@@ -250,7 +250,7 @@ are in `logP_smi.dat`).
 
 ---
 
-## 7. Bug fix — explicit-hydrogen / deuterium molecules
+## 7. Bug fix 1 — explicit-hydrogen / deuterium molecules
 
 Discovered while attempting to run deuterium-labelled SDS
 (`[2H]C([2H])([2H])...OS(=O)(=O)[O-]`) which crashed with `KeyError: 20`
@@ -317,19 +317,95 @@ test suite (aspirin, propane) continues to pass without change.
 
 ---
 
-## 8. How to reproduce the numbers
+## 8. Bug fix 2 — OOM kill on larger molecules
+
+Discovered when running desoxycholate (DOC, 28 heavy atoms): all 4 MPI ranks
+were killed by the Linux OOM killer (`SIGKILL`, exit code 137) before producing
+any output.
+
+### Root cause
+
+`find_bead_pos` contained this line inside the `for num_beads` loop:
+
+```python
+seq_one_beads = np.array(list(itertools.combinations(list_heavy_atoms, num_beads)))
+```
+
+This materialises the **complete** combinations array in RAM **on every rank
+simultaneously**. For a 28-atom molecule:
+
+| k | C(28,k) | Per-rank array | × 4 ranks |
+|---|---------|---------------|-----------|
+| 9 | 6.9 M | 0.50 GB | 2.0 GB |
+| 10 | 13.1 M | 1.05 GB | 4.2 GB |
+| 11 | 21.5 M | 1.89 GB | 7.6 GB |
+| 12 | 30.4 M | 2.92 GB | 11.7 GB |
+
+With 16 GB total RAM the machine ran out during the `k=10` or `k=11` block.
+
+A secondary problem: `list_combs` and `list_energies` accumulated every trial
+that passed `check_beads` (not just those passing all checks) and were gathered
+across all ranks with two `comm.gather` calls — but were **never read** after
+being stored. Dead code that wasted both memory and MPI bandwidth.
+
+### Fix
+
+([optimization.py](auto_martiniM3/optimization.py), `find_bead_pos`)
+
+Replace the numpy materialisation with a lazy
+`itertools.islice`-strided iterator:
+
+```python
+combo_iter = itertools.combinations(list_heavy_atoms, num_beads)
+if mpi_size > 1:
+    from itertools import islice as _islice
+    combo_iter = _islice(combo_iter, rank, None, mpi_size)
+# islice(gen, rank, None, mpi_size) yields positions rank, rank+size, rank+2*size, …
+# — identical strided coverage with O(1) live memory instead of O(C(N,k)) RAM.
+
+for seq in combo_iter:
+    trial_comb = list(seq)
+    ...
+```
+
+Remove `list_combs`, `list_energies`, `local_combs`, `local_energies` and
+their two `comm.gather` calls entirely.
+
+### Trade-off
+
+`islice` with a step internally advances the underlying generator (a fast C
+extension) through skipped elements — so each rank still iterates O(C(N,k))
+generator steps to pick out its 1/size share. The iteration overhead is
+negligible compared to the actual work per trial; the memory saving is
+transformative (4 × 90 MB instead of 4 × 4+ GB at `k=14`).
+
+### Verification
+
+After the fix, 4 MPI ranks running DOC (28 heavy atoms) show ~98% CPU and
+~90 MB RSS each — swap is untouched. The run completes without OOM kill.
+The existing SMILES test suite and the deuterated SDS test both continue to
+pass.
+
+---
+
+## 9. How to reproduce the numbers
 
 ```bash
 conda activate automartiniM3
 pip install -e .              # picks up mpi_utils.py and the new benchmark files
 pip install mpi4py            # optional; only needed for the MPI path
 
-# Hotspot 1
+# Hotspot 1: bead-placement search
 python benchmarks/bench_find_bead_pos.py
 mpirun -n 2 python benchmarks/bench_find_bead_pos.py
 mpirun -n 4 python benchmarks/bench_find_bead_pos.py
 
-# Hotspot 2 (requires network access to vcclab.org)
+# Hotspot 2: ALOGPS HTTP batch (requires network access to vcclab.org)
 python benchmarks/bench_alogps.py
 mpirun -n 4 python benchmarks/bench_alogps.py
+
+# OOM fix: confirm DOC (28 heavy atoms) no longer crashes
+mpirun --oversubscribe -n 4 python -m auto_martiniM3 \
+    --smi "C[C@H](CCC(=O)[O-])[C@H]1CC[C@@H]2[C@@]1([C@H](C[C@H]3[C@H]2CC[C@H]4[C@@]3(CC[C@H](C4)O)C)O)C" \
+    --mol DOC
 ```

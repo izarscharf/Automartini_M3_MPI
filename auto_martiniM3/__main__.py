@@ -34,6 +34,7 @@ import sys
 from . import __version__, solver
 from .common import *
 from .topology import gen_molecule_sdf, gen_molecule_smi
+from .mpi_utils import is_root
 
 def checkArgs(args):
     """ AutoM3 change: removed argument --top for simpler input, .itp file will be named by using --mol argument (mol.itp)"""
@@ -126,6 +127,7 @@ if args.bartender_output:
     cg = solver.Cg_molecule(mol, smiles, args.molname, args.simple_model, topname, bartenderfname, args.bartender_output, args.logp, args.forcepred)
 else:
     cg = solver.Cg_molecule(mol, smiles, args.molname, args.simple_model, topname, bartenderfname, args.bartender_output, args.logp, args.forcepred)
-if args.aa:
-    cg.output_aa(args.aa)
-cg.output_cg(groname)
+if is_root():
+    if args.aa:
+        cg.output_aa(args.aa)
+    cg.output_cg(groname)

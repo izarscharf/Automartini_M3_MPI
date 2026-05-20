@@ -29,6 +29,7 @@ and LICENSE files.
 
 from . import optimization, output, topology
 from .common import *
+from .mpi_utils import get_mpi, bcast, is_root
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +105,17 @@ class Cg_molecule:
         logger.info("Entering cg_molecule()")
 
         ### AutoM3 : MINIMIZATION with RDkit ###
-        molecule = Chem.Mol(molecule)
-        AllChem.EmbedMolecule(molecule)
-        AllChem.MMFFOptimizeMolecule(molecule, maxIters=1000,mmffVariant='MMFF94s')
-        #AllChem.NormalizeDepiction(molecule, scaleFactor=1.12) 
+        # Under MPI, only rank 0 runs the (stochastic) embedding; the resulting
+        # molecule is then broadcast so every rank works from identical
+        # coordinates. Outside MPI this is a no-op.
+        _, _rank, _mpi_size = get_mpi()
+        if _rank == 0:
+            molecule = Chem.Mol(molecule)
+            AllChem.EmbedMolecule(molecule)
+            AllChem.MMFFOptimizeMolecule(molecule, maxIters=1000, mmffVariant='MMFF94s')
+        if _mpi_size > 1:
+            molecule = bcast(molecule if _rank == 0 else None)
+        #AllChem.NormalizeDepiction(molecule, scaleFactor=1.12)
 
         feats = topology.extract_features(molecule)
 
@@ -340,16 +348,17 @@ class Cg_molecule:
                     else:
                         self.topout, bartender_input_info = topology.topout_noVS(header_write, atoms_write, bonds_write, angles_write, dihedrals_write, self.cg_bead_coords, ring_atoms, cg_beads)
                 
-                if bartender:
+                if bartender and is_root():
                     bartender_out = topology.bartender_input(molecule, molname, atoms_in_smi, bartender_input_info)
                     with open(bartenderfname, "w") as btf:
                         btf.write(bartender_out)
-                
-                if topfname:
+
+                if topfname and is_root():
                     with open(topfname, "w") as fp:
                         fp.write(self.topout)
-                if not force_map: print("Converged to solution in {} iteration(s)".format(attempt + 1))
-                if force_map: print("Converged to solution in {} iteration(s)".format(attempt + 1 + max_attempts))
+                if is_root():
+                    if not force_map: print("Converged to solution in {} iteration(s)".format(attempt + 1))
+                    if force_map: print("Converged to solution in {} iteration(s)".format(attempt + 1 + max_attempts))
                 break
             else:
                 attempt += 1

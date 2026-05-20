@@ -28,12 +28,24 @@ and LICENSE files.
 """ 
 
 from sys import exit
+from concurrent.futures import ThreadPoolExecutor
 
 from auto_martiniM3._version import __version__
 
 from .common import *
+from .mpi_utils import get_mpi
 
 logger = logging.getLogger(__name__)
+
+# Module-level caches to avoid redundant work in smi2alogps:
+#   _LOGP_FILE_CACHE: parsed contents of logP_smi.dat (loaded once per file)
+#   _ALOGPS_CACHE:    (query_smi, is_mol) -> (free_energy_kJ_per_mol, origin_str)
+# These persist for the lifetime of the Python process, so repeated calls
+# (trial-mode then final-mode print_atoms, multiple solver attempts,
+# check_additivity, etc.) hit the cache instead of re-parsing the file or
+# re-issuing HTTP requests.
+_LOGP_FILE_CACHE = {}
+_ALOGPS_CACHE = {}
 
 # For feature extraction
 fdefName = os.path.join(RDConfig.RDDataDir, "BaseFeatures.fdef")
@@ -443,14 +455,31 @@ def print_atoms(molname,forcepred,cgbeads,molecule,hbonda,hbondd,partitioning,ri
     text = ""
     atoms_in_smi_dict={}
 
+    # AutoM3: pre-compute the per-bead SMILES fragments and prefetch ALOGPS
+    # values for all uncharged fragments in one parallel batch. This avoids
+    # the serial bead-by-bead HTTP round-trips that dominated wall-time for
+    # multi-bead molecules. Results are cached so the main loop below (and
+    # subsequent calls -- trial vs final pass, solver retries, check_additivity)
+    # hit memory instead of the network.
+    _bead_substructs = []
+    _prefetch_pairs = []
     for bead in range(len(cgbeads)):
-        # Determine SMI of substructure
         try:
-            smi_frag, wc_log_p, charge, atoms_in_smi, converted_smi, real_smi  = substruct2smi(
-                molecule, partitioning, bead
-            )
+            _bs = substruct2smi(molecule, partitioning, bead)
         except Exception:
             raise
+        _bead_substructs.append(_bs)
+        smi_frag, _, _, _, converted_smi, real_smi = _bs
+        mol_frag, errval = gen_molecule_smi(smi_frag)
+        if errval == 0 and get_charge(mol_frag) == 0:
+            query_smi = real_smi if converted_smi else smi_frag
+            _prefetch_pairs.append((query_smi, False))
+    if _prefetch_pairs:
+        prefetch_alogps(_prefetch_pairs, logp_file)
+
+    for bead in range(len(cgbeads)):
+        # Use the substructure data already computed in the prefetch pass.
+        smi_frag, wc_log_p, charge, atoms_in_smi, converted_smi, real_smi = _bead_substructs[bead]
         atoms_in_smi_dict[bead+1]=atoms_in_smi.replace(" ; atoms: ","") # AutoM3
 
         atom_name = ""
@@ -1340,91 +1369,166 @@ def bartender_input(mol, molname, atoms_in_beads, bart_info_dict): ### AutoM3 ##
                     text+=f"{','.join(i)}\n"
     return text
 
-def smi2alogps(forcepred, smi, wc_log_p, bead, converted_smi, real_smi, logp_file=None, trial=False): 
+def _load_logp_file(logp_file):
+    """Parse logP_smi.dat once and cache it. Returns dict[smi -> logP]."""
+    if logp_file in _LOGP_FILE_CACHE:
+        return _LOGP_FILE_CACHE[logp_file]
+    data = {}
+    if isinstance(logp_file, str) and logp_file:
+        try:
+            with open(logp_file) as f:
+                for line in f:
+                    parts = line.rstrip().split()
+                    if len(parts) >= 2:
+                        data[parts[0]] = float(parts[1])
+        except Exception:
+            print(f"An error occurred while reading the logP file")
+    else:
+        print(f"Invalid file name: {logp_file}")
+    _LOGP_FILE_CACHE[logp_file] = data
+    return data
+
+
+def _resolve_logp_file(logp_file):
+    if not logp_file:
+        return os.path.join(os.path.dirname(__file__), 'logP_smi.dat')
+    return logp_file
+
+
+def _alogps_http_request(smi):
+    """Single HTTP request to ALOGPS. Returns raw logP float, or None if the
+    response does not contain a mol_1 record. Raises on network error."""
+    session = requests.session()
+    logger.debug("Calling http://vcclab.org/web/alogps/calc?SMILES=" + str(smi))
+    req = session.get(
+        "http://vcclab.org/web/alogps/calc?SMILES=" + str(smi.replace("#", "%23"))
+    )
+    doc = BeautifulSoup(req.content, "lxml")
+    soup = doc.prettify()
+    for line in soup.split("\n"):
+        parts = line.split()
+        if "mol_1" in parts:
+            return float(parts[parts.index("mol_1") + 1])
+    return None
+
+
+def prefetch_alogps(smi_pairs, logp_file=None, max_workers=8):
+    """Pre-populate the ALOGPS cache for the given list of (query_smi, is_mol)
+    pairs. HTTP requests for fragments that are not already cached and not in
+    the local logP database are distributed across MPI ranks (if any) and
+    issued concurrently within each rank via a thread pool. All ranks end up
+    with identical cache state.
+
+    is_mol == True is treated like the bead=="MOL" branch in smi2alogps:
+    the local database is skipped and the HTTP path is taken directly.
     """
-    Returns water/octanol partitioning free energy according to ALOGPS
-    AutoM3 : Returns water/octanol partitioning free energy defined empiricaly from customized database
+    logp_file = _resolve_logp_file(logp_file)
+    logP_data = _load_logp_file(logp_file)
+
+    # De-duplicate, skip entries already cached, and short-circuit local hits.
+    to_fetch = []
+    seen = set()
+    for query_smi, is_mol in smi_pairs:
+        key = (query_smi, bool(is_mol))
+        if key in seen or key in _ALOGPS_CACHE:
+            continue
+        seen.add(key)
+        if not is_mol and query_smi in logP_data:
+            _ALOGPS_CACHE[key] = (float(logP_data[query_smi]), "")
+            continue
+        to_fetch.append(key)
+
+    if not to_fetch:
+        return
+
+    comm, rank, size = get_mpi()
+    # All HTTP requests are issued from rank 0 with a thread pool and the
+    # results broadcast. We deliberately do NOT stride HTTP work across MPI
+    # ranks: vcclab.org rate-limits per source IP, and `mpirun -n N` on the
+    # same host would have all N ranks share one public IP. Splitting work
+    # across ranks just multiplies concurrent connections from that single
+    # IP and triggers throttling (measured: 4 ranks × 8 threads ran ~5x
+    # slower than 1 rank × 8 threads against the live service).
+    if rank == 0:
+        n_workers = min(max_workers, len(to_fetch))
+        local_results = {}
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            future_to_key = {ex.submit(_alogps_http_request, k[0]): k for k in to_fetch}
+            for fut, key in future_to_key.items():
+                try:
+                    local_results[key] = fut.result()
+                except Exception:
+                    # Leave the entry out so the eventual smi2alogps caller
+                    # surfaces the original "Can't reach vcclab.org" error.
+                    pass
+    else:
+        local_results = None
+
+    if comm is not None and size > 1:
+        local_results = comm.bcast(local_results, root=0)
+
+    for key, raw_logp in local_results.items():
+        if raw_logp is not None:
+            _ALOGPS_CACHE[key] = (convert_log_k(raw_logp), "; ALOGPS defined bead")
+        # If raw_logp is None the fragment failed; let smi2alogps handle it
+        # (forcepred / Wildman-Crippen fallback or hard exit).
+
+
+def smi2alogps(forcepred, smi, wc_log_p, bead, converted_smi, real_smi, logp_file=None, trial=False):
+    """
+    Returns water/octanol partitioning free energy according to ALOGPS.
+    AutoM3 : also consults a local logP database (logP_smi.dat) before
+    falling back to the vcclab.org HTTP service. Results are memoised in
+    a module-level cache to avoid redundant file reads and network calls.
     """
     logger.debug("Entering smi2alogps()")
 
-    ### AutoM3 ###
-    if not logp_file:
-        logp_file = os.path.join(os.path.dirname(__file__), 'logP_smi.dat')
-    found_smi = False
-    if bead != "MOL":
-        logP_data = {}
-        if converted_smi:
-            smi=real_smi
+    is_mol = (bead == "MOL")
+    # Determine the SMILES actually used as the lookup / query key.
+    query_smi = real_smi if (converted_smi and not is_mol) else smi
+    if is_mol and converted_smi:
+        # Preserve original behaviour: the MOL branch in the old code did not
+        # apply the converted->real substitution before its HTTP call (it ran
+        # straight through to the request block which then re-applied it).
+        query_smi = real_smi
 
-        # Check if logp_file is a valid file name
-        if isinstance(logp_file, str) and logp_file:
-            try:
-                with open(logp_file) as f:
-                    for line in f:
-                        (key, val) = line.rstrip().split()
-                        logP_data[key] = float(val)
-            except Exception as e:
-                print(f"An error occurred while reading the logP file")
+    cache_key = (query_smi, is_mol)
+    if cache_key in _ALOGPS_CACHE:
+        return _ALOGPS_CACHE[cache_key]
+
+    logp_file = _resolve_logp_file(logp_file)
+
+    # Local database lookup is only consulted for fragment beads, not MOL.
+    if not is_mol:
+        logP_data = _load_logp_file(logp_file)
+        if query_smi in logP_data:
+            result = (float(logP_data[query_smi]), "")
+            _ALOGPS_CACHE[cache_key] = result
+            return result
+
+    # Fall through to HTTP.
+    try:
+        raw_logp = _alogps_http_request(query_smi)
+    except Exception:
+        print("Error. Can't reach vcclab.org to estimate free energy.")
+        exit(1)
+
+    if raw_logp is None:
+        if forcepred:
+            if trial:
+                sys.stderr.write(
+                    "; Warning: bead ID " + str(bead) +
+                    " predicted from Wildman-Crippen. Fragment " + str(query_smi) + "\n"
+                )
+            raw_logp = wc_log_p
         else:
-            print(f"Invalid file name: {logp_file}")
-        
-        log_p = 0.0
-        for smiles, logp in logP_data.items():
-            if smiles == smi:
-                log_p = float(logp)
-                found_smi = True
-                return (log_p, "")
-                #break
+            print("ALOGPS can't predict fragment: %s" % query_smi)
+            exit(1)
 
-    if not found_smi:
-        if converted_smi:
-            smi=real_smi
-        req = ""
-        soup = ""
-        try:
-            session = requests.session()
-            logger.debug("Calling http://vcclab.org/web/alogps/calc?SMILES=" + str(smi))
-            req = session.get(
-                "http://vcclab.org/web/alogps/calc?SMILES=" + str(smi.replace("#", "%23"))
-            )
-        except:
-            print("Error. Can't reach vcclab.org to estimate free energy.")
-            exit(1)
-        try:
-            doc = BeautifulSoup(req.content, "lxml")
-        except Exception:
-            raise
-        try:
-            soup = doc.prettify()
-        except:
-            print("Error with BeautifulSoup prettify")
-            exit(1)
-        found_mol_1 = False
-        log_p = None
-        for line in soup.split("\n"):
-            line = line.split()
-            if "mol_1" in line:
-                log_p = float(line[line.index("mol_1") + 1])
-                found_mol_1 = True
-                break
-        if not found_mol_1:
-            # If we're forcing a prediction, use Wildman-Crippen
-            if forcepred:
-                if trial:
-                    wrn = (
-                        "; Warning: bead ID "
-                        + str(bead)
-                        + " predicted from Wildman-Crippen. Fragment "
-                        + str(smi)
-                        + "\n"
-                    )
-                    sys.stderr.write(wrn)
-                log_p = wc_log_p
-            else:
-                print("ALOGPS can't predict fragment: %s" % smi)
-                exit(1)
-        logger.debug("logp value: %7.4f" % log_p)
-        return (convert_log_k(log_p),"; ALOGPS defined bead")
+    logger.debug("logp value: %7.4f" % raw_logp)
+    result = (convert_log_k(raw_logp), "; ALOGPS defined bead")
+    _ALOGPS_CACHE[cache_key] = result
+    return result
 
 def convert_log_k(log_k):
     """Convert log_{10}K to free energy (in kJ/mol)"""

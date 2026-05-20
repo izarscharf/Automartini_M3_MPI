@@ -1,6 +1,40 @@
 Auto_MartiniM3
 ============
 
+> ## :rocket: About this fork
+>
+> This repository is a **fork of [Auto_MartiniM3](https://github.com/Martini-Force-Field-Initiative/Automartini_M3)**
+> created to **improve performance on larger molecules through parallelization**.
+> The upstream code runs single-threaded and becomes very slow as the number of
+> heavy atoms grows, because the bead-placement search enumerates
+> `C(N_heavy, k)` trial combinations per bead count and scores each one
+> independently. This fork adds an MPI-based parallel path for that search and
+> a thread-pooled prefetch for the ALOGPS HTTP queries.
+>
+> The implementation work was carried out **with the help of Claude Code
+> (Anthropic)** under interactive human guidance. See
+> [PARALLELIZATION.md](PARALLELIZATION.md) for the technical writeup and
+> [CLAUDE_DEVELOPMENT_LOG.md](CLAUDE_DEVELOPMENT_LOG.md) for the development
+> log (problem analysis, design decisions, the chat transcript that produced
+> the patches, and benchmark numbers).
+>
+> **Quick taste of the speed-ups** (measured on the local `bench_find_bead_pos.py`
+> and `bench_alogps.py` micro-benchmarks):
+>
+> | Hotspot                 | Before  | After (parallel) |
+> |-------------------------|---------|------------------|
+> | `find_bead_pos` (ibuprofen, 15 heavy atoms) | 4.43 s | **1.01 s** with 4 MPI ranks (4.4×) |
+> | `find_bead_pos` (caffeine, 14 heavy atoms)  | 3.06 s | **0.72 s** with 4 MPI ranks (4.2×) |
+> | ALOGPS HTTP batch (17 fragments)            | 5.7 s  | **2.7 s** with thread-pooled prefetch (2.1×) |
+>
+> Run the parallel pipeline with:
+> ```bash
+> mpirun -n 4 python -m auto_martiniM3 --smi "<SMILES>" --mol NAME
+> ```
+> Outputs are bit-identical to the serial path (verified by diffing the
+> generated `.itp` files). Without `mpirun` the code transparently falls
+> back to the original single-process behaviour.
+
 ## What is Auto_MartiniM3?
 
 A toolkit that enables automatic generation of Martini force field for small organic molecules up to 25 heavy atoms, now in agreement with Martini 3 Force Field parameters. 
@@ -163,6 +197,40 @@ IMPROPERS
 1,2,3,4
 2,3,4,5
 ```
+## Parallel execution (fork addition)
+
+This fork adds MPI parallelism around the expensive bead-placement search and
+thread-pooled batching around the ALOGPS HTTP queries. To use it:
+
+```bash
+# Install the extra dependency once (already covered if you reinstall with `pip install -e .`):
+pip install mpi4py
+
+# Then launch with mpirun. Pick a rank count up to (but not above) the number
+# of physical cores on the machine. 4 is the sweet spot on a single 8-core box.
+mpirun -n 4 python -m auto_martiniM3 --smi "<SMILES>" --mol NAME
+```
+
+The serial path is untouched — calling `python -m auto_martiniM3 ...` without
+`mpirun` runs exactly as it always did. Internally the code asks `mpi4py`
+whether it is running under an MPI launcher and only activates the parallel
+paths when `size > 1`.
+
+Two micro-benchmarks under `benchmarks/` cover the parallelized hot-spots:
+
+```bash
+# Bead-placement search (the dominant cost for medium/large molecules):
+mpirun -n 4 python benchmarks/bench_find_bead_pos.py
+
+# ALOGPS prefetch (the dominant cost when many bead fragments are not in
+# the local logP_smi.dat database):
+mpirun -n 4 python benchmarks/bench_alogps.py
+```
+
+See [PARALLELIZATION.md](PARALLELIZATION.md) for the design notes and
+[CLAUDE_DEVELOPMENT_LOG.md](CLAUDE_DEVELOPMENT_LOG.md) for the development
+history.
+
 ## Caveats
 
 For frequently encountered problems, see [FEP](FEP.md).

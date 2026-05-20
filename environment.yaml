@@ -7,7 +7,30 @@ channels:
 dependencies:
   - python=3.8
   - pip
-  - rdkit
-  - pytest
+
+  # Core scientific stack
+  - rdkit>=2022.03.4
+  - numpy>=1.23.1
+  - cython>=0.29.21
+
+  # ALOGPS HTTP path (topology.smi2alogps)
+  - requests>=2.28.1
+  - beautifulsoup4>=4.11.1
+  - lxml>=4.9.1
+
+  # Misc runtime deps used in the package
+  - six>=1.16.0
+
+  # Parallel execution (this fork): MPI runtime + Python bindings.
+  # openmpi pulls in mpirun/mpiexec so `mpirun -n N python -m auto_martiniM3 ...`
+  # works without relying on a system-wide MPI install. If you already have
+  # a cluster MPI you'd rather use, drop the `openmpi` line and install
+  # mpi4py against that MPI via pip instead.
+  - openmpi>=4.1
+  - mpi4py>=3.1
+
+  # Testing
+  - pytest>=6.2
+
   - pip:
       - .

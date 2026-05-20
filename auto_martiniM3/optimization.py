@@ -31,6 +31,7 @@ from sys import exit
 
 from .common import *
 from . import topology # AutoM3 change
+from .mpi_utils import get_mpi
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +355,8 @@ def find_bead_pos(
     list_combs = []
     list_energies = []
 
+    comm, rank, mpi_size = get_mpi()
+
     for num_beads in range(min_beads,max_beads+1):
 
         # Use recursive function to loop through all possible
@@ -363,8 +366,18 @@ def find_bead_pos(
         combs = []
         energies = []
 
-        # Trial positions: any heavy atom
-        for seq in seq_one_beads:
+        # Stride trial combinations across MPI ranks (strided slicing keeps
+        # work balanced even when acceptance/cost varies across the index range).
+        local_indices = range(rank, len(seq_one_beads), mpi_size) if mpi_size > 1 else range(len(seq_one_beads))
+
+        local_trials = []
+        local_best_ene = 1e6
+        local_best_comb = []
+        local_combs = []
+        local_energies = []
+
+        for idx in local_indices:
+            seq = seq_one_beads[idx]
             trial_comb = list(seq)
             acceptable_trial = check_beads(
                 molecule, list_heavy_atoms, heavyatom_coords, trial_comb, ring_atoms, list_bonds
@@ -374,19 +387,19 @@ def find_bead_pos(
 
                 # Do the energy evaluation
                 trial_ene = eval_gaussian_interac(molecule, conformer, trial_comb, ringatoms_flat)
-                combs.append(trial_comb)
-                energies.append(trial_ene)
+                local_combs.append(trial_comb)
+                local_energies.append(trial_ene)
 
                 logger.info("; %s %s", trial_comb, trial_ene)
                 # Make sure all atoms within one bead would be connected
                 if all_atoms_in_beads_connected(
                     trial_comb, heavyatom_coords, list_heavy_atoms, list_bonds, molecule, allatom_coords, force_map
                 ): # AutoM3 change : Added molecule and force_map arguments
-                    
-                    # Accept the move
-                    if trial_ene < ene_best_trial:
-                        ene_best_trial = trial_ene
-                        best_trial_comb = sorted(trial_comb)
+
+                    # Track local best (used only to fold into a global best)
+                    if trial_ene < local_best_ene:
+                        local_best_ene = trial_ene
+                        local_best_comb = sorted(trial_comb)
                     # Get bead positions
                     beadpos = [[0] * 3 for l in range(len(trial_comb))]
                     for l in range(len(trial_comb)):
@@ -395,14 +408,58 @@ def find_bead_pos(
                             for m in range(3)
                         ]
                     # Store configuration
-                    list_trial_comb.append([trial_comb, beadpos, trial_ene])
+                    local_trials.append([trial_comb, beadpos, trial_ene])
 
-        if last_best_trial_comb == best_trial_comb:
+        # Reduce across ranks: gather every rank's accepted trials onto rank 0,
+        # then broadcast the combined state needed to evaluate the early-exit
+        # condition. Pickle-based gather is fine here — payloads are small
+        # (a few lists per trial) and the loop is run at most max_beads times.
+        if mpi_size > 1:
+            all_trials_lists = comm.gather(local_trials, root=0)
+            all_combs_lists = comm.gather(local_combs, root=0)
+            all_energies_lists = comm.gather(local_energies, root=0)
+            all_best = comm.gather((local_best_ene, local_best_comb), root=0)
+
+            if rank == 0:
+                for tl in all_trials_lists:
+                    list_trial_comb.extend(tl)
+                for cl in all_combs_lists:
+                    combs.extend(cl)
+                for el in all_energies_lists:
+                    energies.extend(el)
+                # Fold local bests into the running global best
+                for be, bc in all_best:
+                    if be < ene_best_trial:
+                        ene_best_trial = be
+                        best_trial_comb = bc
+                should_break = (last_best_trial_comb == best_trial_comb)
+            else:
+                should_break = False
+            should_break = comm.bcast(should_break, root=0)
+            # Keep ene_best_trial/best_trial_comb in sync on all ranks so
+            # subsequent num_beads iterations make the same decisions.
+            ene_best_trial = comm.bcast(ene_best_trial, root=0)
+            best_trial_comb = comm.bcast(best_trial_comb, root=0)
+        else:
+            list_trial_comb.extend(local_trials)
+            combs.extend(local_combs)
+            energies.extend(local_energies)
+            if local_best_ene < ene_best_trial:
+                ene_best_trial = local_best_ene
+                best_trial_comb = local_best_comb
+            should_break = (last_best_trial_comb == best_trial_comb)
+
+        if should_break:
             break
 
         last_best_trial_comb = best_trial_comb
         list_combs.append(combs)
         list_energies.append(energies)
+
+    # Only rank 0 has the full list_trial_comb; broadcast the final result
+    # so all ranks can return identical values (callers may rely on it).
+    if mpi_size > 1:
+        list_trial_comb = comm.bcast(list_trial_comb, root=0)
 
     sorted_combs = np.array(sorted(list_trial_comb, key=itemgetter(2)), dtype="object")
     return sorted_combs[:, 0], sorted_combs[:, 1]

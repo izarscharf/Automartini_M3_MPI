@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat /tmp/ASP.gro)",
+      "Read(//tmp/**)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

@@ -3,7 +3,8 @@
     "allow": [
       "Bash(cat /tmp/ASP.gro)",
       "Read(//tmp/**)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(awk '{print $1, $2, $3, $4, $11}')"
     ]
   }
 }

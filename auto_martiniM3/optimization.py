@@ -351,10 +351,6 @@ def find_bead_pos(
     ene_best_trial = 1e6
     last_best_trial_comb = []
 
-    # Keep track of all combinations and scores
-    list_combs = []
-    list_energies = []
-
     comm, rank, mpi_size = get_mpi()
 
     for num_beads in range(min_beads,max_beads+1):
@@ -362,22 +358,23 @@ def find_bead_pos(
         # Use recursive function to loop through all possible
         # combinations of CG bead positions.
         if num_beads==0: num_beads=1
-        seq_one_beads = np.array(list(itertools.combinations(list_heavy_atoms, num_beads)))
-        combs = []
-        energies = []
 
-        # Stride trial combinations across MPI ranks (strided slicing keeps
-        # work balanced even when acceptance/cost varies across the index range).
-        local_indices = range(rank, len(seq_one_beads), mpi_size) if mpi_size > 1 else range(len(seq_one_beads))
+        # MEMORY FIX: do NOT materialise the full combinations array.
+        # np.array(list(itertools.combinations(N=28, k=10..14))) allocates
+        # 1–4.5 GB *per rank*, killing the process via OOM on larger molecules.
+        # Instead use a lazy islice-strided iterator: each rank visits only its
+        # 1/size share of the generator with O(1) live memory.
+        combo_iter = itertools.combinations(list_heavy_atoms, num_beads)
+        if mpi_size > 1:
+            # islice(gen, start, None, step) yields positions start, start+step, ...
+            from itertools import islice as _islice
+            combo_iter = _islice(combo_iter, rank, None, mpi_size)
 
         local_trials = []
         local_best_ene = 1e6
         local_best_comb = []
-        local_combs = []
-        local_energies = []
 
-        for idx in local_indices:
-            seq = seq_one_beads[idx]
+        for seq in combo_iter:
             trial_comb = list(seq)
             acceptable_trial = check_beads(
                 molecule, list_heavy_atoms, heavyatom_coords, trial_comb, ring_atoms, list_bonds
@@ -387,8 +384,6 @@ def find_bead_pos(
 
                 # Do the energy evaluation
                 trial_ene = eval_gaussian_interac(molecule, conformer, trial_comb, ringatoms_flat)
-                local_combs.append(trial_comb)
-                local_energies.append(trial_ene)
 
                 logger.info("; %s %s", trial_comb, trial_ene)
                 # Make sure all atoms within one bead would be connected
@@ -412,21 +407,16 @@ def find_bead_pos(
 
         # Reduce across ranks: gather every rank's accepted trials onto rank 0,
         # then broadcast the combined state needed to evaluate the early-exit
-        # condition. Pickle-based gather is fine here — payloads are small
-        # (a few lists per trial) and the loop is run at most max_beads times.
+        # condition. Only list_trial_comb (combinations that passed all checks)
+        # is gathered — the intermediate combs/energies lists that existed before
+        # were dead code (accumulated but never used) and have been removed.
         if mpi_size > 1:
             all_trials_lists = comm.gather(local_trials, root=0)
-            all_combs_lists = comm.gather(local_combs, root=0)
-            all_energies_lists = comm.gather(local_energies, root=0)
             all_best = comm.gather((local_best_ene, local_best_comb), root=0)
 
             if rank == 0:
                 for tl in all_trials_lists:
                     list_trial_comb.extend(tl)
-                for cl in all_combs_lists:
-                    combs.extend(cl)
-                for el in all_energies_lists:
-                    energies.extend(el)
                 # Fold local bests into the running global best
                 for be, bc in all_best:
                     if be < ene_best_trial:
@@ -442,8 +432,6 @@ def find_bead_pos(
             best_trial_comb = comm.bcast(best_trial_comb, root=0)
         else:
             list_trial_comb.extend(local_trials)
-            combs.extend(local_combs)
-            energies.extend(local_energies)
             if local_best_ene < ene_best_trial:
                 ene_best_trial = local_best_ene
                 best_trial_comb = local_best_comb
@@ -453,8 +441,6 @@ def find_bead_pos(
             break
 
         last_best_trial_comb = best_trial_comb
-        list_combs.append(combs)
-        list_energies.append(energies)
 
     # Only rank 0 has the full list_trial_comb; broadcast the final result
     # so all ranks can return identical values (callers may rely on it).

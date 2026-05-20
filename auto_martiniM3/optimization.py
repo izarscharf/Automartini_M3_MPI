@@ -485,15 +485,16 @@ def all_atoms_in_beads_connected(trial_comb, heavyatom_coords, list_heavyatoms, 
 
     for i in range(len(trial_comb)):
         cg_bead = trial_comb[i]
-        num_atoms = list(voronoi.values()).count(voronoi[list_heavyatoms.index(cg_bead)])
+        # voronoi is now keyed by global atom indices (same as trial_comb / bondlist).
+        num_atoms = list(voronoi.values()).count(voronoi[cg_bead])
         # sub-part of bond list that only contains atoms within CG bead
         sub_bond_list = []
         for j in range(len(bondlist)):
             if (
-                voronoi[list_heavyatoms.index(bondlist[j][0])]
-                == voronoi[list_heavyatoms.index(cg_bead)]
-                and voronoi[list_heavyatoms.index(bondlist[j][1])]
-                == voronoi[list_heavyatoms.index(cg_bead)]
+                voronoi[bondlist[j][0]]
+                == voronoi[cg_bead]
+                and voronoi[bondlist[j][1]]
+                == voronoi[cg_bead]
             ):
                 sub_bond_list.append(bondlist[j])
         num_bonds = len(sub_bond_list)
@@ -588,31 +589,39 @@ def voronoi_atoms_new(cgbead_coords, heavyatom_coords, allatom_coords, molecule)
         if f"{at1}-{at2}" not in bonds and f"{at2}-{at1}" not in bonds:
             bonds.append(f"{at1}-{at2}")
 
-    # create partitioning including hydrogens inside beads
-    aa_partitioning = partitioning.copy()
-    for at in range(len(allatom_coords)):
-        if at not in aa_partitioning.keys():
-            hbead = None
-            for b in bonds:
-                bond = b.split('-')
-                if str(at) in bond:
-                    at1=int(bond[0])
-                    at2=int(bond[-1])
-                    if at==at1 and at2 in partitioning.keys(): 
-                        hbead = partitioning[at2]
-                        hydrogen = at1
-                    if at==at2 and at1 in partitioning.keys():
-                        hbead = partitioning[at1]
-                        hydrogen = at2
+    # Convert partitioning from local (0..N_heavy-1) to global atom indices.
+    # Every caller (substruct2smi, solver.py, all_atoms_in_beads_connected) treats
+    # partitioning keys as global RDKit atom indices. For molecules without explicit H
+    # the two are identical (accidentally correct); for [2H]-labelled molecules such
+    # as deuterated lipids the heavy atoms sit at non-contiguous global indices and
+    # the old local-keyed dict produced silently wrong results or a KeyError.
+    _heavy_global = [gi for gi in range(molecule.GetNumAtoms())
+                     if molecule.GetAtomWithIdx(gi).GetAtomicNum() != 1]
+    partitioning = {_heavy_global[j]: bead for j, bead in partitioning.items()}
 
-                    if hbead is not None: # found hydrogen atom connected to 
-                        aa_partitioning[hydrogen]=hbead
+    # Build aa_partitioning (global-indexed, includes H/D) for the COG calculation.
+    aa_partitioning = dict(partitioning)  # copy, already global-keyed
+
+    for at in range(molecule.GetNumAtoms()):
+        if at not in aa_partitioning:
+            for b in bonds:
+                parts = b.split('-')
+                if str(at) in parts:
+                    a1, a2 = int(parts[0]), int(parts[-1])
+                    if at == a1 and a2 in aa_partitioning:
+                        aa_partitioning[at] = aa_partitioning[a2]
+                        break
+                    if at == a2 and a1 in aa_partitioning:
+                        aa_partitioning[at] = aa_partitioning[a1]
+                        break
 
     #compute COG while taking into account hydrogens
     bead_coord={}
     for atom in range(len(allatom_coords)):
-        bead=aa_partitioning[atom]
-        if bead not in bead_coord.keys(): 
+        bead = aa_partitioning.get(atom)
+        if bead is None:
+            continue
+        if bead not in bead_coord:
             bead_coord[bead]=[]
         bead_coord[bead].append(allatom_coords[atom])
 
@@ -689,31 +698,33 @@ def voronoi_atoms_old(cgbead_coords, heavyatom_coords, allatom_coords, molecule)
         if f"{at1}-{at2}" not in bonds and f"{at2}-{at1}" not in bonds:
             bonds.append(f"{at1}-{at2}")
 
-    # create partitioning including hydrogens inside beads
-    aa_partitioning = partitioning.copy()
-    for at in range(len(allatom_coords)):
-        if at not in aa_partitioning.keys():
-            hbead = None
-            for b in bonds:
-                bond = b.split('-')
-                if str(at) in bond:
-                    at1=int(bond[0])
-                    at2=int(bond[-1])
-                    if at==at1 and at2 in partitioning.keys(): 
-                        hbead = partitioning[at2]
-                        hydrogen = at1
-                    if at==at2 and at1 in partitioning.keys():
-                        hbead = partitioning[at1]
-                        hydrogen = at2
+    # Same local→global conversion as in voronoi_atoms_new (see comment there).
+    _heavy_global = [gi for gi in range(molecule.GetNumAtoms())
+                     if molecule.GetAtomWithIdx(gi).GetAtomicNum() != 1]
+    partitioning = {_heavy_global[j]: bead for j, bead in partitioning.items()}
 
-                    if hbead is not None: # found hydrogen atom connected to 
-                        aa_partitioning[hydrogen]=hbead
+    aa_partitioning = dict(partitioning)
+
+    for at in range(molecule.GetNumAtoms()):
+        if at not in aa_partitioning:
+            for b in bonds:
+                parts = b.split('-')
+                if str(at) in parts:
+                    a1, a2 = int(parts[0]), int(parts[-1])
+                    if at == a1 and a2 in aa_partitioning:
+                        aa_partitioning[at] = aa_partitioning[a2]
+                        break
+                    if at == a2 and a1 in aa_partitioning:
+                        aa_partitioning[at] = aa_partitioning[a1]
+                        break
 
     #compute COG while taking into account hydrogens
     bead_coord={}
     for atom in range(len(allatom_coords)):
-        bead=aa_partitioning[atom]
-        if bead not in bead_coord.keys(): 
+        bead = aa_partitioning.get(atom)
+        if bead is None:
+            continue
+        if bead not in bead_coord:
             bead_coord[bead]=[]
         bead_coord[bead].append(allatom_coords[atom])
 

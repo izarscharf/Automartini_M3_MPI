@@ -1,0 +1,3 @@
+2026-05-20 15:05:03,758 [INFO](__main__:<module>:108): Running auto_martiniM3 v0.0.0
+2026-05-20 15:05:03,838 [INFO](auto_martiniM3.solver:__init__:105): Entering cg_molecule()
+2026-05-20 15:05:04,182 [INFO](auto_martiniM3.optimization:find_bead_pos:393): ; [1, 7, 13, 19] -116.3902241704277

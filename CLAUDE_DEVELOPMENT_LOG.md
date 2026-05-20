@@ -273,6 +273,25 @@ condensed paraphrase, not a verbatim transcript.
 > **User**: Document everything in the README and add a development log.
 >
 > **(This document.)**
+>
+> **User**: Run deuterium-labelled SDS with the MPI invocation:
+> `mpirun -n 4 python3 -m auto_martiniM3 --smi "[2H]C([2H])..." --mol SDS`
+>
+> **Claude Code**: Crashes on both serial and MPI paths with `KeyError: 20` in
+> `voronoi_atoms_new`. Diagnosis: the function builds `partitioning` with local
+> heavy-atom indices (0..N-1) as keys, but all downstream callers treat them as
+> global RDKit atom indices. For normal molecules the two are identical. For
+> deuterium molecules (heavy atoms at global indices [1,4,7,…,41]) they diverge:
+> `at1=19 in {0..16}` is False even though atom 19 is a heavy carbon, so the D
+> at global index 20 is never assigned. Fix: convert `partitioning` to
+> global-indexed before returning (two lines per voronoi function); remove the
+> now-redundant `list_heavyatoms.index()` wrappers in
+> `all_atoms_in_beads_connected`. Both serial and MPI produce the correct 7-bead
+> SDS topology; existing test suite unchanged.
+>
+> **User**: Update the README and other logs on the changes just made.
+>
+> **(This update.)**
 
 ---
 

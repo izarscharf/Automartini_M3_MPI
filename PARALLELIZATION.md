@@ -163,7 +163,7 @@ the public ALOGPS service.
 | File | Change |
 |------|--------|
 | [auto_martiniM3/mpi_utils.py](auto_martiniM3/mpi_utils.py) | **New.** Thin wrapper exposing `get_mpi()`, `is_root()`, `bcast()`, `barrier()` with serial fallback. |
-| [auto_martiniM3/optimization.py](auto_martiniM3/optimization.py) | `find_bead_pos` is now MPI-aware: strided trial loop, per-rank locals, gather/bcast at each `num_beads` block. |
+| [auto_martiniM3/optimization.py](auto_martiniM3/optimization.py) | `find_bead_pos` is now MPI-aware: strided trial loop, per-rank locals, gather/bcast at each `num_beads` block. `voronoi_atoms_new` / `voronoi_atoms_old` fixed to return global-indexed `partitioning` (see §7). `all_atoms_in_beads_connected` updated accordingly. |
 | [auto_martiniM3/topology.py](auto_martiniM3/topology.py) | `smi2alogps` rewritten to use a memoised cache and a single-load `logP_smi.dat`; new `prefetch_alogps()` and HTTP helper `_alogps_http_request`; `print_atoms` does a one-shot prefetch pass. |
 | [auto_martiniM3/solver.py](auto_martiniM3/solver.py) | Stochastic embed/minimisation run only on rank 0 and the molecule broadcast; file writes and the converged-print gated on `is_root()`. |
 | [auto_martiniM3/\_\_main\_\_.py](auto_martiniM3/__main__.py) | `.gro` writes gated on `is_root()`. |
@@ -250,7 +250,74 @@ are in `logP_smi.dat`).
 
 ---
 
-## 7. How to reproduce the numbers
+## 7. Bug fix — explicit-hydrogen / deuterium molecules
+
+Discovered while attempting to run deuterium-labelled SDS
+(`[2H]C([2H])([2H])...OS(=O)(=O)[O-]`) which crashed with `KeyError: 20`
+inside `voronoi_atoms_new`.
+
+### Root cause
+
+`voronoi_atoms_new` and `voronoi_atoms_old` build `partitioning` as
+
+```python
+for j in range(len(heavyatom_coords)):   # j = local heavy-atom index 0..N-1
+    partitioning[j] = bead
+```
+
+Every downstream caller (`substruct2smi`, `solver.Cg_molecule`,
+`topology.print_atoms`, …) treats the keys of `partitioning` as **global**
+RDKit atom indices and does things like `molecule.GetAtomWithIdx(key)`.
+
+For molecules with no explicit H/D atoms, local and global indices are
+identical and the code works by accident. For deuterium-labelled molecules
+the heavy atoms sit at non-contiguous global indices (e.g. [1,4,7,…,41]
+for SDS with `[2H]`) so:
+
+* The hydrogen-assignment section checked `at1 in partitioning.keys()` with
+  a global bond endpoint (`at1 = 19`) against local keys `{0..16}`. Since
+  `19 > 16`, the check failed, the deuterium at global index 20 was never
+  inserted into `aa_partitioning`, and the COG loop raised `KeyError: 20`.
+* Even when no crash occurred (e.g. for D atoms whose global index happened
+  to fall within `{0..N-1}`), the wrong local-keyed bead was returned,
+  giving silently incorrect bead assignments and substructure SMILES.
+
+### Fix
+
+In both `voronoi_atoms_new` and `voronoi_atoms_old`
+([optimization.py](auto_martiniM3/optimization.py)):
+
+```python
+# After running the Voronoi algorithm with local indices, convert
+# partitioning to global atom indices before returning.
+_heavy_global = [gi for gi in range(molecule.GetNumAtoms())
+                 if molecule.GetAtomWithIdx(gi).GetAtomicNum() != 1]
+partitioning = {_heavy_global[j]: bead for j, bead in partitioning.items()}
+```
+
+The hydrogen-assignment loop and COG calculation were updated to work with
+the now-global `partitioning` directly (no further translation needed).
+
+`all_atoms_in_beads_connected` was the one caller that *correctly*
+converted global → local via `list_heavyatoms.index()` before lookup. Those
+wrappers were removed now that the dict is already globally keyed:
+
+```python
+# Before:
+voronoi[list_heavyatoms.index(cg_bead)]
+# After:
+voronoi[cg_bead]          # cg_bead is a global atom index from trial_comb
+```
+
+### Verification
+
+Deuterium-labelled SDS now produces a valid 7-bead `.itp` in both serial
+and MPI (`mpirun -n 4`) modes with identical output. The existing SMILES
+test suite (aspirin, propane) continues to pass without change.
+
+---
+
+## 8. How to reproduce the numbers
 
 ```bash
 conda activate automartiniM3

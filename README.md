@@ -27,6 +27,16 @@ Auto_MartiniM3
 > | `find_bead_pos` (caffeine, 14 heavy atoms)  | 3.06 s | **0.72 s** with 4 MPI ranks (4.2×) |
 > | ALOGPS HTTP batch (17 fragments)            | 5.7 s  | **2.7 s** with thread-pooled prefetch (2.1×) |
 >
+> **Bug fix — explicit-hydrogen molecules (e.g. deuterium-labelled lipids):** The
+> upstream `voronoi_atoms_new` / `voronoi_atoms_old` functions used local
+> heavy-atom indices (0..N-1) as dict keys but all downstream code expected
+> global RDKit atom indices. For normal molecules the two are identical; for
+> molecules with explicit H or `[2H]` atoms they diverge, causing either silent
+> wrong bead assignments or a hard `KeyError` crash. This fork fixes both
+> functions to return global-indexed partitioning and updates the one internal
+> caller (`all_atoms_in_beads_connected`) accordingly. Deuterated SDS now works
+> correctly in both serial and MPI modes.
+>
 > Run the parallel pipeline with:
 > ```bash
 > mpirun -n 4 python -m auto_martiniM3 --smi "<SMILES>" --mol NAME

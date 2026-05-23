@@ -81,6 +81,10 @@ parser.add_argument("--fpred",dest="forcepred",action="store_true", required=Fal
 parser.add_argument("--bartender",dest="bartender_output",action="store_true",required=False,help="Bartender input file") #AutoM3 change
 parser.add_argument("--simple",dest="simple_model",action="store_true",required=False,help="Simple model without dihedrals nor virtual sites") #AutoM3 change
 parser.add_argument("--canon",dest="canonic_smiles",action="store_true",required=False,help="Translate to RdKit canon structure") #AutoM3 change
+parser.add_argument("--ndx", dest="ndx", action="store_true", required=False,
+                    help="Write GROMACS index file (MOL.ndx) mapping heavy atoms to CG beads")
+parser.add_argument("--map", dest="map", action="store_true", required=False,
+                    help="Write VOTCA-CSG XML mapping file (MOL.map) for the Fast-Forward pipeline")
 
 if len(sys.argv) == 1:
     parser.print_help(sys.stderr)
@@ -131,3 +135,7 @@ if is_root():
     if args.aa:
         cg.output_aa(args.aa)
     cg.output_cg(groname)
+    if args.ndx:
+        cg.output_ndx(args.molname + ".ndx")
+    if args.map:
+        cg.output_map(args.molname + ".map")

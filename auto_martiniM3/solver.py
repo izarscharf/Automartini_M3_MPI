@@ -92,14 +92,18 @@ class Cg_molecule:
         # AutoM3 new arguments : mol_smi, simple_model, bartenderfname, bartender, logp_file
 
         self.heavy_atom_coords = None
-        self.atom_coords = None # AutoM3 new variable 
+        self.atom_coords = None # AutoM3 new variable
         self.list_heavyatom_names = None
+        self.list_heavy_atoms = None       # global atom indices of heavy atoms (for NDX/map output)
         self.atom_partitioning = None
         self.cg_bead_names = []
         self.cg_bead_coords = []
+        self.bead_types = []               # Martini 3 bead type strings (for map output)
         self.topout = None
-        self.bartender_out = None # AutoM3 new variable 
-        self.molname=molname # AutoM3 change : for pretty GRO file (will be easier to look on a molecule in VMD with its proper name)
+        self.bartender_out = None # AutoM3 new variable
+        self.molname = molname # AutoM3 change
+        self._molecule = None              # RDKit Mol kept for NDX/map output
+        self._mol_smi = mol_smi
         force_map = False # AutoM3 new variable
 
         logger.info("Entering cg_molecule()")
@@ -121,6 +125,8 @@ class Cg_molecule:
 
         # Get list of heavy atoms and their coordinates
         list_heavy_atoms, self.list_heavyatom_names = topology.get_atoms(molecule)
+        self.list_heavy_atoms = list_heavy_atoms
+        self._molecule = molecule
 
         conf, self.heavy_atom_coords, self.atom_coords = topology.get_heavy_atom_coords(molecule)
 
@@ -268,7 +274,7 @@ class Cg_molecule:
             
             if success:
                 header_write = topology.print_header(molname, mol_smi)
-                self.cg_bead_names, bead_types, atoms_write, atoms_in_smi = topology.print_atoms( # AutoM3 new variable : atoms_in_smi
+                self.cg_bead_names, bead_types, atoms_write, atoms_in_smi = topology.print_atoms(
                     molname,
                     forcepred,
                     cg_beads,
@@ -282,13 +288,15 @@ class Cg_molecule:
                     trial=False,
                 )
 
+                self.bead_types = bead_types
+
                 bond_list, const_list, bonds_write = topology.print_bonds(
                     cg_beads,
                     cg_beads_rings,
                     molecule,
                     self.atom_partitioning,
                     self.cg_bead_coords,
-                    bead_types, # AutoM3 change
+                    bead_types,
                     ring_atoms,
                     False,
                 )
@@ -372,6 +380,30 @@ class Cg_molecule:
             raise RuntimeError(
                 "ERROR: no successful mapping found.\nTry running with the --fpred and/or --verbose options."
             )
+    def output_ndx(self, ndx_output=None):
+        """Write GROMACS index file (.ndx): one group per CG bead with the
+        1-based heavy-atom serial numbers from the AA .gro file."""
+        ndx = output.output_ndx(
+            self.list_heavy_atoms, self.atom_partitioning, self.cg_bead_names
+        )
+        if ndx_output:
+            with open(ndx_output, "w") as fp:
+                fp.write(ndx)
+        else:
+            return ndx
+
+    def output_map(self, map_output=None):
+        """Write VOTCA-CSG XML mapping file (.map) for the Fast-Forward pipeline."""
+        mapstr = output.output_map(
+            self.list_heavy_atoms, self.atom_partitioning, self.cg_bead_names,
+            self.bead_types, self._molecule, self.molname, self._mol_smi
+        )
+        if map_output:
+            with open(map_output, "w") as fp:
+                fp.write(mapstr)
+        else:
+            return mapstr
+
     def output_aa(self, aa_output=None): # AutoM3 change : molname is the same as argument --mol given at the beginning
         # Optional all-atom output to GRO file
         aa_out = output.output_gro(self.heavy_atom_coords, self.list_heavyatom_names, self.molname)

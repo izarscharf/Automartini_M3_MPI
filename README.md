@@ -109,7 +109,7 @@ To display the usage-information (help), either supply -h, --help, or nothing to
  
 ```
 usage: auto_martiniM3 [-h] [--mode {run}] [--sdf SDF | --smi SMI] [--logp LOGP] [--mol MOLNAME] [--aa AA] [-v]
-                      [--fpred] [--bartender] [--simple] [--canon]
+                      [--fpred] [--bartender] [--simple] [--canon] [--ndx] [--map]
 
 Generates Martini 3 force field for atomistic structures of small organic molecules
 
@@ -126,6 +126,8 @@ optional arguments:
   --bartender    Bartender input file
   --simple       Simple model without dihedrals nor virtual sites
   --canon        Translate to RdKit canon structure
+  --ndx          Write GROMACS index file (MOL.ndx) — one group per CG bead
+  --map          Write VOTCA-CSG XML mapping file (MOL.map) for Fast-Forward
 
 Developers:
 ===========

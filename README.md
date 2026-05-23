@@ -218,6 +218,103 @@ IMPROPERS
 1,2,3,4
 2,3,4,5
 ```
+## Fast-Forward pipeline outputs (fork addition)
+
+This fork adds two extra output files that feed directly into the
+[Fast-Forward](https://github.com/Martini-Force-Field-Initiative/Bartender)
+/ VOTCA-CSG workflow for validating CG bonded parameters against a reference
+AA simulation.
+
+### `--ndx` — GROMACS index file
+
+Writes `MOL.ndx` with one named group per CG bead containing the 1-based
+heavy-atom serial numbers that match the AA `.gro` file (produced by `--aa`).
+A trailing `[ System ]` group covers all heavy atoms.
+
+```bash
+python -m auto_martiniM3 --smi "CC(=O)OC1=CC=CC=C1C(=O)O" --mol ASP --aa ASP_aa.gro --ndx
+```
+
+Example `ASP.ndx`:
+```
+[ N01 ]
+     1     2     3
+[ P01 ]
+     4     5
+[ C01 ]
+     6     7
+[ C02 ]
+     8     9    10
+[ N02 ]
+    11    12    13
+[ System ]
+     1     2     3     4     5     6     7     8     9    10    11    12    13
+```
+
+Use with GROMACS to extract per-bead centre-of-geometry positions from an AA trajectory:
+```bash
+gmx traj -f aa.xtc -n ASP.ndx -ox bead_cog.xvg -com -ng 5
+```
+
+### `--map` — VOTCA-CSG XML mapping file
+
+Writes `MOL.map` in VOTCA-CSG format. Each `<cg_bead>` element lists the
+Martini 3 bead type, a `COG` (centre-of-geometry) operator, and the heavy
+atoms that map to it. Atom labels use the `RES:ElementGlobalIdx` convention
+(e.g. `ASP:C0`) which cross-references the `; atoms:` column already in the
+`.itp`.
+
+```bash
+python -m auto_martiniM3 --smi "CC(=O)OC1=CC=CC=C1C(=O)O" --mol ASP --map
+```
+
+Example `ASP.map` (fragment):
+```xml
+<cg_molecule>
+  <name>ASP</name>
+  <ident>ASP</ident>
+  <topology>
+    <cg_beads>
+      <cg_bead>
+        <name>N01</name>
+        <type>SN5a</type>
+        <mapping>COG</mapping>
+        <beads>ASP:C0 ASP:C1 ASP:O2</beads>
+      </cg_bead>
+      ...
+    </cg_beads>
+  </topology>
+</cg_molecule>
+```
+
+Use with `csg_map` to back-map an AA trajectory to CG coordinates:
+```bash
+csg_map --top aa.tpr --trj aa.xtc --out cg.xtc --cg ASP.map
+```
+
+Both flags can be combined with MPI:
+```bash
+mpirun -n 4 python -m auto_martiniM3 --smi "..." --mol ASP --aa ASP_aa.gro --ndx --map
+```
+
+### `itp_to_map.py` — convert an existing `.itp` without re-running
+
+If you have already computed the CG topology and do not want to re-run
+`auto_martiniM3` (e.g. for a large molecule), use the standalone converter.
+It parses only the annotated `.itp` text — no RDKit or AutoMartiniM3
+installation required.
+
+```bash
+python3 itp_to_map.py DOC.itp                      # writes DOC.ndx and DOC.map
+python3 itp_to_map.py DOC.itp --out-dir /ff_run/   # write to a different directory
+python3 itp_to_map.py DOC.itp --mol DOCX            # override molecule name
+```
+
+The converter reads the `; atoms: C0, C1, O2,` annotation on each `[atoms]`
+line (written by AutoMartiniM3 since the original release) to reconstruct the
+full bead-to-atom mapping. Output is byte-identical to what `--ndx` / `--map`
+produce when running `auto_martiniM3` directly.
+
 ## Parallel execution (fork addition)
 
 This fork adds MPI parallelism around the expensive bead-placement search and

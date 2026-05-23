@@ -4,7 +4,17 @@
       "Bash(cat /tmp/ASP.gro)",
       "Read(//tmp/**)",
       "Bash(python -c ' *)",
-      "Bash(awk '{print $1, $2, $3, $4, $11}')"
+      "Bash(awk '{print $1, $2, $3, $4, $11}')",
+      "Bash(curl -s \"https://raw.githubusercontent.com/jbarnoud/cgbuilder/refs/heads/master/cgbuilder/static/demo_molecule.map\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/jbarnoud/cgbuilder/master/cgbuilder/static/demo_molecule.map\")",
+      "Bash(curl -s \"https://api.github.com/repos/jbarnoud/cgbuilder/contents/\")",
+      "Bash(python3 -c \"import sys,json; [print\\(f['path']\\) for f in json.load\\(sys.stdin\\) if isinstance\\(f, dict\\)]\")",
+      "Bash(curl -s \"https://api.github.com/repos/jbarnoud/cgbuilder/git/trees/master?recursive=1\")",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -sL \"https://jbarnoud.github.io/cgbuilder/\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/vermouth-martinize/vermouth-martinize/main/vermouth/data/mappings/universal/DMPC.map\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/marrink-lab/vermouth-martinize/main/vermouth/data/mappings/universal/DMPC.map\")",
+      "Bash(curl -s \"https://api.github.com/repos/marrink-lab/vermouth-martinize/contents/vermouth/data/mappings\")"
     ]
   }
 }

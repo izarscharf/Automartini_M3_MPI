@@ -84,7 +84,9 @@ parser.add_argument("--canon",dest="canonic_smiles",action="store_true",required
 parser.add_argument("--ndx", dest="ndx", action="store_true", required=False,
                     help="Write GROMACS index file (MOL.ndx) mapping heavy atoms to CG beads")
 parser.add_argument("--map", dest="map", action="store_true", required=False,
-                    help="Write VOTCA-CSG XML mapping file (MOL.map) for the Fast-Forward pipeline")
+                    help="Write CGBuilder-format mapping file (MOL.map) for Fast-Forward")
+parser.add_argument("--map-votca", dest="map_votca", action="store_true", required=False,
+                    help="Write VOTCA-CSG XML mapping file (MOL.map) — alternative to --map")
 
 if len(sys.argv) == 1:
     parser.print_help(sys.stderr)
@@ -139,3 +141,5 @@ if is_root():
         cg.output_ndx(args.molname + ".ndx")
     if args.map:
         cg.output_map(args.molname + ".map")
+    if args.map_votca:
+        cg.output_map_votca(args.molname + ".map")

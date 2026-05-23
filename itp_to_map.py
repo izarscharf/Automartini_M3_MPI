@@ -4,7 +4,7 @@ itp_to_map.py
 =============
 Convert an AutoMartiniM3-annotated .itp file to:
 
-  <mol>.map   VOTCA-CSG XML mapping file for Fast-Forward / csg_map
+  <mol>.map   CGBuilder-format mapping file for Fast-Forward (default)
   <mol>.ndx   GROMACS index file for gmx traj, gmx rdf, etc.
 
 No RDKit or AutoMartiniM3 installation required — only the .itp text is parsed.
@@ -13,7 +13,8 @@ the bead-to-atom information needed to reconstruct both files.
 
 Usage
 -----
-    python3 itp_to_map.py ASP.itp
+    python3 itp_to_map.py ASP.itp                    # CGBuilder format (default)
+    python3 itp_to_map.py ASP.itp --votca             # VOTCA-CSG XML format
     python3 itp_to_map.py ASP.itp --mol MYNAME
     python3 itp_to_map.py ASP.itp --out-dir /path/to/outdir
 
@@ -183,14 +184,39 @@ def write_ndx(beads, serial_map, out_path: Path):
     out_path.write_text("\n".join(lines) + "\n")
 
 
-def write_map(beads, molname, smiles, out_path: Path):
-    """Write VOTCA-CSG XML .map file."""
+def write_map(beads, serial_map, molname, out_path: Path):
+    """Write CGBuilder-format .map file (default)."""
+    bead_names = [b['name'] for b in beads]
+    # Build (serial, atomname, beadname) sorted by serial
+    entries = []
+    for bead in beads:
+        for atom in bead['atoms']:
+            if atom in serial_map:
+                entries.append((serial_map[atom], atom, bead['name']))
+    entries.sort(key=lambda x: x[0])
+
+    lines = [
+        "[molecule]",
+        molname,
+        "",
+        "[ martini ]",
+        " ".join(bead_names),
+        "",
+        "[ atoms ]",
+    ]
+    for serial, atom_name, bead_name in entries:
+        lines.append(f"{serial:<6} {atom_name:<6} {bead_name}")
+    lines.append("")
+    out_path.write_text("\n".join(lines))
+
+
+def write_map_votca(beads, molname, smiles, out_path: Path):
+    """Write VOTCA-CSG XML .map file (--votca flag)."""
     res = molname[:4]
     lines = [
         '<?xml version="1.0"?>',
-        f'<!-- AutoMartiniM3 mapping file for {molname} -->',
+        f'<!-- AutoMartiniM3 VOTCA mapping file for {molname} -->',
         f'<!-- SMILES: {smiles} -->',
-        '<!-- Atom labels: ElementSymbol+GlobalAtomIndex (0-based), matching ; atoms: in .itp -->',
         f'<!-- Use with: csg_map --top aa.tpr --trj aa.xtc --out cg.xtc --cg {out_path.name} -->',
         '<cg_molecule>',
         f'  <name>{molname}</name>',
@@ -223,7 +249,7 @@ def write_map(beads, molname, smiles, out_path: Path):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Convert an AutoMartiniM3 .itp to VOTCA .map and GROMACS .ndx",
+        description="Convert an AutoMartiniM3 .itp to CGBuilder .map and GROMACS .ndx",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -232,6 +258,8 @@ def main():
                     help="Override molecule name (default: read from .itp)")
     ap.add_argument("--out-dir", dest="out_dir", default=None,
                     help="Output directory (default: same directory as .itp)")
+    ap.add_argument("--votca", dest="votca", action="store_true",
+                    help="Write VOTCA-CSG XML format instead of CGBuilder format")
     args = ap.parse_args()
 
     itp_path = Path(args.itp)
@@ -251,6 +279,8 @@ def main():
     print(f"  Beads    : {len(beads)}")
     print(f"  Heavy atoms: {len(serial_map)}")
     print(f"  SMILES   : {smiles}")
+    fmt = "VOTCA XML" if args.votca else "CGBuilder"
+    print(f"  Map format : {fmt}")
 
     ndx_path = out_dir / f"{molname}.ndx"
     map_path = out_dir / f"{molname}.map"
@@ -258,7 +288,10 @@ def main():
     write_ndx(beads, serial_map, ndx_path)
     print(f"  Written  : {ndx_path}")
 
-    write_map(beads, molname, smiles, map_path)
+    if args.votca:
+        write_map_votca(beads, molname, smiles, map_path)
+    else:
+        write_map(beads, serial_map, molname, map_path)
     print(f"  Written  : {map_path}")
 
     print("Done.")

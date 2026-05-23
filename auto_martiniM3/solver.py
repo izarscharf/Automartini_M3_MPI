@@ -393,8 +393,20 @@ class Cg_molecule:
             return ndx
 
     def output_map(self, map_output=None):
-        """Write VOTCA-CSG XML mapping file (.map) for the Fast-Forward pipeline."""
+        """Write CGBuilder-format mapping file (.map) — default."""
         mapstr = output.output_map(
+            self.list_heavy_atoms, self.atom_partitioning, self.cg_bead_names,
+            self.bead_types, self._molecule, self.molname, self._mol_smi
+        )
+        if map_output:
+            with open(map_output, "w") as fp:
+                fp.write(mapstr)
+        else:
+            return mapstr
+
+    def output_map_votca(self, map_output=None):
+        """Write VOTCA-CSG XML mapping file (.map) — alternative format."""
+        mapstr = output.output_map_votca(
             self.list_heavy_atoms, self.atom_partitioning, self.cg_bead_names,
             self.bead_types, self._molecule, self.molname, self._mol_smi
         )

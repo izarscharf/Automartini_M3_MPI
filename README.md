@@ -127,7 +127,8 @@ optional arguments:
   --simple       Simple model without dihedrals nor virtual sites
   --canon        Translate to RdKit canon structure
   --ndx          Write GROMACS index file (MOL.ndx) — one group per CG bead
-  --map          Write VOTCA-CSG XML mapping file (MOL.map) for Fast-Forward
+  --map          Write CGBuilder-format mapping file (MOL.map) for Fast-Forward
+  --map-votca    Write VOTCA-CSG XML mapping file (MOL.map) — alternative format
 
 Developers:
 ===========
@@ -256,43 +257,61 @@ Use with GROMACS to extract per-bead centre-of-geometry positions from an AA tra
 gmx traj -f aa.xtc -n ASP.ndx -ox bead_cog.xvg -com -ng 5
 ```
 
-### `--map` — VOTCA-CSG XML mapping file
+### `--map` — CGBuilder-format mapping file (default)
 
-Writes `MOL.map` in VOTCA-CSG format. Each `<cg_bead>` element lists the
-Martini 3 bead type, a `COG` (centre-of-geometry) operator, and the heavy
-atoms that map to it. Atom labels use the `RES:ElementGlobalIdx` convention
-(e.g. `ASP:C0`) which cross-references the `; atoms:` column already in the
-`.itp`.
+Writes `MOL.map` in the format produced by the
+[CGBuilder](https://jbarnoud.github.io/cgbuilder/) tool and consumed by the
+vermouth / martinize2 / Fast-Forward ecosystem. Three sections:
+
+- `[molecule]` — molecule name
+- `[ martini ]` — space-separated list of CG bead names
+- `[ atoms ]` — one line per heavy atom: `serial  atomname  beadname`
+
+Atom names use `ElementGlobalIdx` (e.g. `C0`, `O3`), matching the
+`; atoms:` column already in the `.itp`. Serial numbers are 1-based and
+match the `.ndx` file.
 
 ```bash
 python -m auto_martiniM3 --smi "CC(=O)OC1=CC=CC=C1C(=O)O" --mol ASP --map
 ```
 
-Example `ASP.map` (fragment):
-```xml
-<cg_molecule>
-  <name>ASP</name>
-  <ident>ASP</ident>
-  <topology>
-    <cg_beads>
-      <cg_bead>
-        <name>N01</name>
-        <type>SN5a</type>
-        <mapping>COG</mapping>
-        <beads>ASP:C0 ASP:C1 ASP:O2</beads>
-      </cg_bead>
-      ...
-    </cg_beads>
-  </topology>
-</cg_molecule>
+Example `ASP.map`:
+```
+[molecule]
+ASP
+
+[ martini ]
+N01 P01 C01 C02 N02
+
+[ atoms ]
+1      C0     N01
+2      C1     N01
+3      O2     N01
+4      O3     P01
+5      C4     P01
+6      C5     C01
+7      C6     C01
+8      C7     C02
+9      C8     C02
+10     C9     C02
+11     C10    N02
+12     O11    N02
+13     O12    N02
 ```
 
-Use with `csg_map` to back-map an AA trajectory to CG coordinates:
+### `--map-votca` — VOTCA-CSG XML mapping file (alternative)
+
+For workflows that consume VOTCA XML directly, use `--map-votca` instead.
+Writes the same `MOL.map` filename in XML format with `<cg_bead>` elements
+and `RES:ElementGlobalIdx` atom labels (e.g. `ASP:C0`).
+
 ```bash
+python -m auto_martiniM3 --smi "CC(=O)OC1=CC=CC=C1C(=O)O" --mol ASP --map-votca
+# then:
 csg_map --top aa.tpr --trj aa.xtc --out cg.xtc --cg ASP.map
 ```
 
-Both flags can be combined with MPI:
+All output flags can be combined, and all work with MPI:
 ```bash
 mpirun -n 4 python -m auto_martiniM3 --smi "..." --mol ASP --aa ASP_aa.gro --ndx --map
 ```
@@ -305,7 +324,8 @@ It parses only the annotated `.itp` text — no RDKit or AutoMartiniM3
 installation required.
 
 ```bash
-python3 itp_to_map.py DOC.itp                      # writes DOC.ndx and DOC.map
+python3 itp_to_map.py DOC.itp                      # CGBuilder format (default)
+python3 itp_to_map.py DOC.itp --votca              # VOTCA-CSG XML format
 python3 itp_to_map.py DOC.itp --out-dir /ff_run/   # write to a different directory
 python3 itp_to_map.py DOC.itp --mol DOCX            # override molecule name
 ```
